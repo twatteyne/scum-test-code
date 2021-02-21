@@ -4,24 +4,26 @@
 #include "../scm3_hardware_interface.h"
 #include "../scm3C_hardware_interface.h"
 
+/*
+2019.
+This file contains the C functions to configure scan for various
+ADC tests. This is _only_ for functions which configure SCM
+to run ADC tests; don't put any actual test code in here!
+*/
+
 void prog_asc_bit(unsigned int position, unsigned int val){
 	/*
 	Inputs:
-		position: Unsigned integer. The position in the ASC to change.
+		position: Unsigned integer. The position in the ASC to change, e.g.
+			setting scan bit 10 to 1 should be prog_asc_bit(10,1)
 		val: Unsigned integer. Nonzero if the value should be set to 1, 
 			zero if it should be set to 0.
 	Outputs:
 		No return value. Sets the value in the ASC with the proper 
-		masking, etc. given the input boolean value.
+		masking, etc. given the input 'val'.
 	*/
-	// unsigned int index = position >> 5;
-	if (val != 0) {
-		set_asc_bit(position);
-	}
-	else {
-		clear_asc_bit(position);
-	}
-
+	if (val != 0) {set_asc_bit(position);}
+	else {clear_asc_bit(position);}
 }
 
 
@@ -115,3 +117,117 @@ void scan_config_adc(unsigned int sel_reset, unsigned int sel_convert,
 	prog_asc_bit(1088, pga_byp);
 }
 
+
+void onchip_fix_control_config_adc(void) {
+	/*
+	Inputs:
+		No inputs.
+	Outputs:
+		No return value. Sets adc_reset to be controlled via GPIO loopback.
+		All other controlling signals come from the on-chip FSM. Enables 
+		I/O buffers for the GPIOs and sets the appropriate banks for the 
+		GPIOs. Does not disable any buffers. Note that this _does_ overwrite
+		any bank settings.
+	Notes:
+		Untested.
+	*/
+	unsigned int gpo_mask = get_GPO_enables();
+	unsigned int gpi_mask = get_GPI_enables();
+
+	gpo_mask |= 0x0027;
+	gpi_mask |= 0x0001;
+
+	GPO_enables(gpo_mask);
+	GPI_enables(gpi_mask);
+
+	GPO_control(6,9,9,9);
+	GPI_control(3,0,0,0);
+}
+
+
+void loopback_control_config_adc(void) {
+	/*
+	Inputs:
+		No inputs.
+	Outputs:
+		No return value. Enables I/O buffers for the GPIOs and sets the 
+		appropriate banks for the GPIOs for GPIO loopback control of the 
+		ADC. Does not disable any buffers. 
+		Note that this _does_ overwrite any bank settings.
+	*/
+	unsigned int gpo_mask = get_GPO_enables();
+	unsigned int gpi_mask = get_GPI_enables();
+	
+	gpo_mask |= 0x0027;
+	gpi_mask |= 0x0007;
+	
+	GPO_enables(gpo_mask);
+	GPI_enables(gpi_mask);
+
+	GPO_control(6,9,9,9);
+	GPI_control(3,0,0,0);
+}
+
+void gpio_read_config_adc(void) {
+	/*
+	Inputs:
+		No inputs.
+	Outputs:
+		No return value. Enables the relevant GPIO buffers
+		and sets the banks appropritaely to have the sensor ADC output
+		come from the GPOs. Does not disable any buffers from their 
+		initial setting. Note that this does overwrite any
+		bank settings.
+	Notes:
+		Untested.
+	*/
+	unsigned int gpo_mask = get_GPO_enables();
+	gpo_mask |= 0xFFC0;
+
+	GPO_enables(gpo_mask);
+
+	GPO_control(6,9,9,9);
+}
+
+void gpio_onchip_config_adc(unsigned int gpi_control, unsigned int gpo_read) {
+	/*
+	Inputs:
+		gpi_control: 0 or 1. True = control the FSM via GPI
+			rather than relying on the taped-out FSM.
+		gpo_read: 0 or 1. True = use GPOs to output the sensor
+			ADC output bits and the ``done'' signal.
+	Outputs:
+		None. Enables the necessary GPIO buffers and sets the 
+		banks appropriately for the GPIOs to control the FSM via GPI
+		and/or read the ADC data from the GPO. 
+	Note:
+		This disables any potentially conflicting buffers in the affected
+		GPIOs, i.e. input and output buffers will not be enabled 
+		simultaneously for the GPIOs necessarily set by this function.
+		All other GPIOs will be left as-is.
+	
+		Untested.
+	*/
+	unsigned int gpi_mask = get_GPI_enables();
+	unsigned int gpo_mask = get_GPO_enables();
+
+	if (gpi_control) {
+		gpi_mask = gpi_mask |= 0xE000;
+		GPI_control(3, 
+					get_GPI_control(1), 
+					get_GPI_control(2), 
+					get_GPI_control(3));
+		gpo_mask = gpo_mask &= ~0xE000;
+	}
+
+	if (gpo_read) {
+		gpo_mask = gpo_mask |= 0x07FF;
+		gpi_mask = gpi_mask &= ~0x07FF;
+		GPO_control(get_GPO_control(0),
+					9,
+					9,
+					9);
+	}
+	GPI_enables(gpi_mask);
+	GPO_enables(gpo_mask);
+}

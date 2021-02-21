@@ -1,219 +1,123 @@
-import numpy as np
-import scipy as sp
-from scipy import stats
-import matplotlib.pyplot as plt
+"""
+Lydia Lee, 2019
+This file contains the code to run various tests on the ADC. The functions in this file
+are meant to communicate with other entities like the Teensy, SCM, and others. For post-
+processing and data reading/writing/plotting, please see data_handling.py. This assumes
+that you're working strictly through the Cortex and that outputs will be read from the
+UART.
+"""
+# import numpy as np
+# import scipy as sp
 import serial
 import visa
-import time
-import random
-from data_handling import *
+# import time
+# import random
+# from data_handling import *
+from sensor_adc.adc_fsm import *
+# from pprint import pprint
 
-def program_cortex(teensy_port="COM15", uart_port="COM18", file_binary="./code.bin",
-		boot_mode='optical', skip_reset=False, insert_CRC=False,
-		pad_random_payload=False):
+# import sys
+# sys.path.append('..')
+# from bootload import *
+
+def test_adc_spot(port="COM16", control_mode='uart', read_mode='uart', iterations=1,
+		gpio_settings=dict()):
 	"""
 	Inputs:
-		teensy_port: String. Name of the COM port that the Teensy
+		port: String. Name of the COM port that the UART or the reading Teensy
 			is connected to.
-		uart_port: String. Name of the COM port that the UART 
-			is connected to.
-		file_binary: String. Path to the binary file to 
-			feed to Teensy to program SCM. This binary file shold be
-			compiled using whatever software is meant to end up 
-			on the Cortex. This group tends to compile it using Keil
-			projects.
-		boot_mode: String. 'optical' or '3wb'. The former will assume an
-			optical bootload, whereas the latter will use the 3-wire
-			bus.
-		skip_reset: Boolean. True: Skip hard reset before optical 
-			programming. False: Perform hard reset before optical programming.
-		insert_CRC: Boolean. True = insert CRC for payload integrity 
-			checking. False = do not insert CRC. Note that SCM C code 
-			must also be set up for CRC check for this to work.
-		pad_random_payload: Boolean. True = pad unused payload space with 
-			random data and check it with CRC. False = pad with zeros, do 
-			not check integrity of padding. This is useful to check for 
-			programming errors over full 64kB payload.
-	Outputs:
-		No return value. Feeds the input from file_binary to the Teensy to program SCM
-		and programs SCM. 
-	Raises:
-		ValueError if the boot_mode isn't 'optical' or '3wb'.
-	Notes:
-		When setting optical parameters, all values can be toggled to improve
-		success when programming. In particular, too small a third value can
-		cause the optical programmer to lose/eat the short pulses.
-	"""
-	# Open COM port to Teensy
-	teensy_ser = serial.Serial(
-		port=teensy_port,
-		baudrate=19200,
-		parity=serial.PARITY_NONE,
-		stopbits=serial.STOPBITS_ONE,
-		bytesize=serial.EIGHTBITS)
-
-	# Open binary file from Keil
-	with open(file_binary, 'rb') as f:
-		bindata = bytearray(f.read())
-
-	# Need to know how long the binary payload is for computing CRC
-	code_length = len(bindata) - 1
-	pad_length = 65536 - code_length - 1
-
-	# Optional: pad out payload with random data if desired
-	# Otherwise pad out with zeros - uC must receive full 64kB
-	if(pad_random_payload):
-		for i in range(pad_length):
-			bindata.append(random.randint(0,255))
-		code_length = len(bindata) - 1 - 8
-	else:
-		for i in range(pad_length):
-			bindata.append(0)
-
-	if insert_CRC:
-	    # Insert code length at address 0x0000FFF8 for CRC calculation
-	    # Teensy will use this length value for calculating CRC
-		bindata[65528] = code_length % 256 
-		bindata[65529] = code_length // 256
-		bindata[65530] = 0
-		bindata[65531] = 0
-	
-	# Transfer payload to Teensy
-	teensy_ser.write(b'transfersram\n')
-	print(teensy_ser.readline())
-	# Send the binary data over uart
-	teensy_ser.write(bindata)
-
-	if insert_CRC:
-	    # Have Teensy calculate 32-bit CRC over the code length 
-	    # It will store the 32-bit result at address 0x0000FFFC
-		teensy_ser.write(b'insertcrc\n')
-
-	if boot_mode == 'optical':
-	    # Configure parameters for optical TX
-		teensy_ser.write(b'configopt\n')
-		teensy_ser.write(b'80\n')
-		teensy_ser.write(b'80\n')
-		teensy_ser.write(b'8\n')
-		teensy_ser.write(b'80\n')
-		
-	    # Encode the payload into 4B5B for optical transmission
-		teensy_ser.write(b'encode4b5b\n')
-
-		if not skip_reset:
-	        # Do a hard reset and then optically boot
-			teensy_ser.write(b'bootopt4b5b\n')
-		else:
-	        # Skip the hard reset before booting
-			teensy_ser.write(b'bootopt4b5bnorst\n')
-
-	    # Display confirmation message from Teensy
-		print(teensy_ser.readline())
-	elif boot_mode == '3wb':
-	    # Execute 3-wire bus bootloader on Teensy
-		teensy_ser.write(b'boot3wb\n')
-
-	    # Display confirmation message from Teensy
-		print(teensy_ser.readline())
-	else:
-		raise ValueError("Boot mode '{}' invalid.".format(boot_mode))
-
-	teensy_ser.write(b'opti_cal\n');
-	teensy_ser.close()
-
-	# Open UART connection to SCM
-	uart_ser = serial.Serial(
-		port=uart_port,
-		baudrate=19200,
-		parity=serial.PARITY_NONE,
-		stopbits=serial.STOPBITS_ONE,
-		bytesize=serial.EIGHTBITS,
-		timeout=.5)
-
-	# After programming, several lines are sent from SCM over UART
-	print(uart_ser.readline())
-	print(uart_ser.readline())
-	print(uart_ser.readline())
-	print(uart_ser.readline())
-	print(uart_ser.readline())
-	# uart_ser.flushOutput()
-
-	return
-
-def test_adc_spot(uart_port="COM16", iterations=1,
-		file_binary="./code.bin",
-		skip_reset=False, insert_CRC=False,
-		pad_random_payload=False):
-	"""
-	Inputs:
-		uart_port: String. Name of the COM port that the UART 
-			is connected to.
+		control_mode: String 'uart', 'loopback' 'gpio'. Determines if you'll be triggering
+			the FSM via UART, GPIO loopback, or externally-controlled (e.g. Teensy) GPI.
+		read_mode: String 'uart' or 'gpio'. Determines if you're reading via GPIO.
 		iterations: Integer. Number of times to take readings.
-		file_binary: String. Path to the binary file to 
-			feed to Teensy to program SCM. This binary file shold be
-			compiled using whatever software is meant to end up 
-			on the Cortex. This group tends to compile it using Keil
-			projects.
-		skip_reset: Boolean. True: Skip hard reset before optical 
-			programming. False: Perform hard reset before optical programming.
-		insert_CRC: Boolean. True = insert CRC for payload integrity 
-			checking. False = do not insert CRC. Note that SCM C code 
-			must also be set up for CRC check for this to work.
-		pad_random_payload: Boolean. True = pad unused payload space with 
-			random data and check it with CRC. False = pad with zeros, do 
-			not check integrity of padding. This is useful to check for 
-			programming errors over full 64kB payload.
+		gpio_settings: Dictionary with the following key:value pairings
+			adc_settle_cycles: Integer [1,256]. Unclear what the control in the original 
+				FSM is, but this will dictate the number of microseconds to wait 
+				for the ADC to settle. Applicable only if the Teensy is used rather than
+				UART.
+			pga_settle_us: Integer. Number of microseconds to wait for the PGA output to
+				to settle. Applicable only if the Teensy is used rather than
+				UART.
 	Outputs:
-		Feeds the input from file_binary to the Teensy to program SCM
-		and boot the cortex. Returns an ordered collection of ADC 
+		Returns an ordered collection of ADC 
 		output codes where the ith element corresponds to the ith reading.
 		Note that this assumes that SCM has already been programmed.
+	Raises:
+		ValueError if the control mode is not 'uart', 'gpio', or 'loopback'.
+		ValueError if the read mode is not 'uart' or 'gpio'.
 	"""
+	if control_mode not in ['uart', 'loopback', 'gpio']:
+		raise ValueError("Invalid control mode {}".format(control_mode))
+	if read_mode not in ['uart', 'gpio']:
+		raise ValueError("Invalid read mode {}".format(read_mode))
+	
 	adc_outs = []
 
-	uart_ser = serial.Serial(
-		port=uart_port,
+	ser = serial.Serial(
+		port=port,
 		baudrate=19200,
 		parity=serial.PARITY_NONE,
 		stopbits=serial.STOPBITS_ONE,
 		bytesize=serial.EIGHTBITS,
-		timeout=.5)
+		timeout=1)
 
-	for i in range(12):
-		time.sleep(.2)
-		print(uart_ser.readline())
+	# Initializing the Teensy settings for GPIO control
+	if control_mode == 'gpio':
+		initialize_gpio(teensy_ser)
 
+	# Take all the readings
 	for i in range(iterations):
-		uart_ser.write(b'adc\n')
-		time.sleep(.5)
-		print(uart_ser.readline())
-		adc_out = uart_ser.readline()
+		trigger_spot(ser, control_mode)
+
+		if read_mode == 'uart':
+			read_func = read_uart
+		elif read_mode == 'gpio':
+			read_func = read_gpo
+
+		adc_out = read_func(ser)
 		adc_outs.append(adc_out)
 	
-	uart_ser.close()
+		# TODO: atm we're soft resetting, but this shouldn't 
+		# be necessary.
+		# ser.write(b'sft\n')
+		# print(ser.readline())
+		# print(ser.readline())
+		# print(ser.readline())
+		# print(ser.readline())
+		# print(ser.readline())
+		# print(ser.readline())
+
+		
+	# Due diligence
+	ser.close()
 
 	return adc_outs
 
 def test_adc_psu(
-		vin_vec, uart_port="COM18", 
-		file_binary="./code.bin",
+		vin_vec, port="COM18", control_mode='uart', read_mode='uart',
 		psu_name='USB0::0x0957::0x2C07::MY57801384::0::INSTR',
-		iterations=1):
+		iterations=1, gpio_settings=dict()):
 	"""
 	Inputs:
 		vin_vec: 1D collection of floats. Input voltages in volts 
 			to feed to the ADC.
-		uart_port: String. Name of the COM port that the UART 
+		port: String. Name of the COM port that the UART or the reading Teensy
 			is connected to.
-		file_binary: String. Path to the binary file to 
-			feed to Teensy to program SCM. This binary file shold be
-			compiled using whatever software is meant to end up 
-			on the Cortex. This group tends to compile it using Keil
-			projects.
+		control_mode: String 'uart', 'loopback' 'gpio'. Determines if you'll be triggering
+			the FSM via UART, GPIO loopback, or externally-controlled (e.g. Teensy) GPI.
+		read_mode: String 'uart' or 'gpio'. Determines if you're reading via GPIO.
 		psu_name: String. Name to use in the connection for the 
 			waveform generator.
 		iterations: Integer. Number of times to take a reading for
 			a single input voltage.
+		gpio_settings: Dictionary with the following key:value pairings
+			adc_settle_cycles: Integer [1,256]. Unclear what the control in the original 
+				FSM is, but this will dictate the number of microseconds to wait 
+				for the ADC to settle. Applicable only if the Teensy is used rather than
+				UART.
+			pga_settle_us: Integer. Number of microseconds to wait for the PGA output to
+				to settle. Applicable only if the Teensy is used rather than
+				UART.
 	Outputs:
 		Returns a dictionary adc_outs where adc_outs[vin][i] will give the 
 		ADC code associated with the i'th iteration when the input
@@ -222,16 +126,25 @@ def test_adc_psu(
 		Uses a serial as well as an arbitrary waveform generator to
 		sweep the input voltage to the ADC. Bypasses the PGA. Does 
 		NOT program scan.
+	Raises:
+		ValueError if the control mode is not 'uart', 'loopback', or 'gpio'.
+		ValueError if the read mode is not 'uart' or 'gpio'.
+	Notes:
+		Externally controlled GPIO is under construction.
 	"""
+	if control_mode not in ['uart', 'loopback', 'gpio']:
+		raise ValueError("Invalid control mode {}".format(control_mode))
+	if read_mode not in ['uart', 'gpio']:
+		raise ValueError("Invalid read mode {}".format(read_mode))
+
 	# Opening up the UART connection
-	uart_ser = serial.Serial(
-		port=uart_port,
+	ser = serial.Serial(
+		port=port,
 		baudrate=19200,
 		parity=serial.PARITY_NONE,
 		stopbits=serial.STOPBITS_ONE,
 		bytesize=serial.EIGHTBITS,
-		timeout=.5)
-
+		timeout=1)
 
 	# Connecting to the arbitrary waveform generator
 	rm = visa.ResourceManager()
@@ -249,323 +162,119 @@ def test_adc_psu(
 	psu.write("SOURCE2:VOLTAGE:OFFSET 0")
 	psu.write("OUTPUT2 ON")
 
-	# Sweeping vin and getting the ADC output code	
+	# Sweeping vin and getting the ADC output code
+	if control_mode == 'gpio':
+		print('External GPIO control under construction')
+		# initialize_gpio(teensy_ser)
+
 	adc_outs = dict()
 	for vin in vin_vec:
 		adc_outs[vin] = []
 		psu.write("SOURCE2:VOLTAGE:OFFSET {}".format(vin))
 		for i in range(iterations):
-			uart_ser.write(b'adc\n')
-			time.sleep(.5)
-			print(uart_ser.readline())
-			adc_out = uart_ser.readline()
+			trigger_spot(ser, control_mode)
+
+			if read_mode == 'uart':
+				read_func = read_uart
+			elif read_mode == 'gpio':
+				read_func = read_gpo
+			
+			adc_out = read_func(ser)
+			
 			adc_outs[vin].append(adc_out)
 			print("Vin={}V/Iteration {} -- {}".format(vin, i, adc_outs[vin][i]))
 
-
+			# TODO: atm we're soft resetting, but this shouldn't 
+			# be necessary.
+			# ser.write(b'sft\n')
+			# print(ser.readline())
+			# print(ser.readline())
+			# print(ser.readline())
+			# print(ser.readline())
+			# print(ser.readline())
+			# print(ser.readline())
 	# Due diligence for closing things out
-	uart_ser.close()
+	ser.close()
+	psu.write("SOURCE2:VOLTAGE:OFFSET 0")
+	psu.write("OUTPUT2 OFF")
 	psu.close()
 	
 	return adc_outs
 
-def test_adc_dnl(vin_min, vin_max, num_bits, 
-		uart_port="COM18", file_binary="./code_bin",
-		psu_name='USB0::0x0957::0x2C07::MY57801384::0::INSTR',
+def test_temp_sensor(scm_port="COM18", temp_port="COM9", control_mode='uart', read_mode='uart',
 		iterations=1):
 	"""
 	Inputs:
-		vin_min/max: Float. The min and max voltages to feed to the
-			ADC.
-		num_bits: Integer. The bit resolution of the ADC.
-		uart_port: String. Name of the COM port that the UART 
+		scm_port: String. Name of the COM port that the UART is connected to.
+		temp_port: String. Name of the COM port that the ground truth temperature sensor
 			is connected to.
-		file_binary: String. Path to the binary file to 
-			feed to Teensy to program SCM. This binary file shold be
-			compiled using whatever software is meant to end up 
-			on the Cortex. This group tends to compile it using Keil
-			projects.
-		psu_name: String. Name to use in the connection for the 
-			waveform generator.
+		control_mode: String 'uart', 'loopback' 'gpio'. Determines if you'll be triggering
+			the FSM via UART, GPIO loopback, or externally-controlled (e.g. Teensy) GPI.
+		read_mode: String 'uart' or 'gpio'. Determines if you're reading via GPIO.
 		iterations: Integer. Number of times to take a reading for
 			a single input voltage.
 	Outputs:
-		Returns a collection of DNLs for each nominal LSB. The length
-		should be 2**(num_bits)-1. Note that this assumes that SCM has 
-		already been programmed.
+		Returns an ordered collection of tuples (gnd_truth, adc_code) 
+		where the ith element corresponds to the ith reading. gnd_truth is the value
+		read from the device used for ground truth temperature measurements.
+		adc_code is the output of the ADC for that particular reading. Note that this 
+		assumes that SCM has already been programmed.
+	Raises:
+		ValueError if the control mode is not 'uart', 'loopback', or 'gpio'.
+		ValueError if the read mode is not 'uart' or 'gpio'.
 	"""
-	# Constructing the vector of input voltages to give the ADC
-	vlsb_ideal = (vin_max-vin_min)/2**num_bits
-	vin_vec = np.arange(vin_min, vin_max, vlsb_ideal/10)
+	if control_mode not in ['uart', 'loopback', 'gpio']:
+		raise ValueError("Invalid control mode {}".format(control_mode))
+	if read_mode not in ['uart', 'gpio']:
+		raise ValueError("Invalid read mode {}".format(read_mode))
 
-	# Running the test
-	adc_outs = test_adc_psu(vin_vec, psu_name, iterations)
-	
-	return calc_adc_dnl(adc_outs, vlsb_ideal)
+	# Opening up the UART connection
+	scm_ser = serial.Serial(
+		port=scm_port,
+		baudrate=19200,
+		parity=serial.PARITY_NONE,
+		stopbits=serial.STOPBITS_ONE,
+		bytesize=serial.EIGHTBITS,
+		timeout=1)
 
-def calc_adc_dnl(adc_outs, vlsb_ideal):
-	"""
-	Inputs: 
-		adc_outs: A dictionary of ADC codes where the key is the vin,
-			and the value is a list of measured codes (more than one
-			measurement can be taken).
-		vlsb_ideal: The nominal voltage associated with a single LSB.
-	Outputs:
-		Returns a collection of DNLs for each nominal LSB. The length
-		should be 2**(num_bits)-1
-	"""
-	# Averaging over all the iterations to get an average of what the ADC
-	# returns.
-	adc_outs_avg = {vin:round(np.average(codes)) for (vin,codes) \
-					in adc_outs.items()}
+	# Opening the ground truth temperature sensor connection
+	temp_ser = serial.Serial(
+		port=temp_port,
+		baudrate=19200,
+		parity=serial.PARITY_NONE,
+		stopbits=serial.STOPBITS_ONE,
+		bytesize=serial.EIGHTBITS,
+		timeout=1)
 
-	vin_prev = min(adc_outs_avg.keys())
-	code_prev = adc_outs_avg[vin_prev]
-	DNLs = []
+	results = []
 
-	# Calculate the DNL for every step
-	for vin in sorted(adc_outs_avg.keys()):
-		code = adc_outs_avg[vin]
-		if code > code_prev:
-			DNL_val = (vin-vin_prev)/vlsb_ideal - 1
-			DNLs.append(DNL_val)
-			vin_prev = vin
-			# If a code is skipped, make the one it skipped functionally
-			# zero width.
-			if code > code_prev + 1:
-				DNLs.append(0)
-			code_prev = code
-	return DNLs
+	for _ in range(iterations):
+		# Trigger the ground truth temperature reading
+		temp_ser.write(b"temp\n")
 
+		# Trigger SCM ADC reading
+		trigger_spot(scm_ser, control_mode)
 
-def test_adc_inl_straightline(vin_min, vin_max, num_bits, 
-		uart_port="COM18", file_binary="./code.bin",
-		psu_name='USB0::0x0957::0x2C07::MY57801384::0::INSTR',
-		iterations=1):
-	"""
-	Inputs:
-		vin_min/max: Float. The min and max voltages to feed to the
-			ADC.
-		num_bits: Integer. The bit resolution of the ADC.
-		uart_port: String. Name of the COM port that the UART 
-			is connected to.
-		file_binary: String. Path to the binary file to 
-			feed to Teensy to program SCM. This binary file shold be
-			compiled using whatever software is meant to end up 
-			on the Cortex. This group tends to compile it using Keil
-			projects.
-		psu_name: String. Name to use in the connection for the 
-			waveform generator.
-		iterations: Integer. Number of times to take a reading for
-			a single input voltage.
-	Outputs:
-		Returns the slope, intercept of the linear regression
-		of the ADC code vs. vin. Note that this assumes that SCM 
-		has already been programmed.
-	"""
-	# Constructing the vector of input voltages to give the ADC
-	vlsb_ideal = (vin_max-vin_min)/2**num_bits
-	vin_vec = np.arange(vin_min, vin_max, vlsb_ideal/4)
+		if read_mode == 'uart':
+			read_func = read_uart
+		elif read_mode == 'gpio':
+			read_func = read_gpo
 
-	# Running the test
-	adc_outs = test_adc_psu(vin_vec, psu_name, iterations)
+		# Read from the ground truth temp sensor
+		gnd_truth = temp_ser.readline()
+		
+		# Read from SCM
+		adc_out = read_func(scm_ser)
 
-	return calc_adc_inl_straightline(adc_outs, vlsb_ideal)
+		print((gnd_truth, adc_out))
+		# Append the results
+		results.append((gnd_truth, adc_out))
 
-def calc_adc_inl_straightline(adc_outs, vlsb_ideal):
-	"""
-	Inputs: 
-		adc_outs: A dictionary of ADC codes where the key is the vin,
-			and the value is a list of measured codes (more than one
-			measurement can be taken).
-		vlsb_ideal: The nominal voltage associated with a single LSB.
-	Outputs:
-		Returns the slope, intercept of the linear regression of the 
-		ADC codes vs. vin.
+	temp_ser.close()
+	scm_ser.close()
 
-	"""
-	# Averaging over all the iterations to get an average of what the ADC
-	# returns.
-	adc_outs_avg = {vin:round(np.average(codes)) for (vin,codes) \
-					in adc_outs.items()}
+	return results
 
-	# Using linear regressiontto figure out the slope and intercept
-	x = list(adc_outs_avg.keys())
-	y = [adc_outs_avg[k] for k in x]
-	slope, intercept, r_value, p_value, std_error = stats.linregress(x, y)
-
-	return slope, intercept
-
-def test_adc_inl_endpoint(vin_min, vin_max, num_bits, 
-		uart_port="COM18", file_binary="./code.binary",
-		psu_name='USB0::0x0957::0x2C07::MY57801384::0::INSTR',
-		iterations=1):
-	"""
-	Inputs:
-		vin_min/max: Float. The min and max voltages to feed to the
-			ADC.
-		num_bits: Integer. The bit resolution of the ADC.
-		uart_port: String. Name of the COM port that the UART 
-			is connected to.
-		file_binary: String. Path to the binary file to 
-			feed to Teensy to program SCM. This binary file shold be
-			compiled using whatever software is meant to end up 
-			on the Cortex. This group tends to compile it using Keil
-			projects.
-		psu_name: String. Name to use in the connection for the 
-			waveform generator.
-		iterations: Integer. Number of times to take a reading for
-			a single input voltage.
-	Outputs:
-		Returns a collection of endpoint INLs taken from vin_min 
-		up to vin_max. Note that this assumes that SCM has already 
-		been programmed.
-	"""
-	# Constructing the vector of input voltages to give the ADC
-	vlsb_ideal = (vin_max-vin_min)/2**num_bits
-	vin_vec = np.arange(vin_min, vin_max, vlsb_ideal/4)
-
-	# Running the test
-	adc_outs = test_adc_psu(vin_vec, psu_name, iterations)
-
-	return calc_adc_inl_endpoint(adc_outs, vlsb_ideal)
-
-def calc_adc_inl_endpoint(adc_outs, vlsb_ideal):
-	"""
-	Inputs: 
-		adc_outs: A dictionary of ADC codes where the key is the vin,
-			and the value is a list of measured codes (more than one
-			measurement can be taken).
-		vlsb_ideal: The nominal voltage associated with a single LSB.
-	Outputs:
-		Returns a collection of endpoint INLs taken from the minimum
-		input voltage up to the maximum input voltage.
-	"""
-	# Averaging over all the iterations to get an average of what the ADC
-	# returns.
-	adc_outs_avg = {vin:round(np.average(codes)) for (vin,codes) \
-					in adc_outs.items()}
-
-	vin_min = min(adc_outs_avg.keys())
-	code_low = adc_outs_avg[vin_min]
-	INLs = []
-
-	# Calculate the endpoint INL for every step
-	for vin,code in adc_outs_avg.items():
-		if code == code_low:
-			continue
-		code_diff = code - code_low
-		INL_val = (vin-vin_min)/vlsb_ideal - code_diff
-		INLs.append(INLs)
-
-	return INLs
 
 if __name__ == "__main__":
-	### Testing programming the cortex ###
-	if False:
-		program_cortex_specs = dict(teensy_port="COM15",
-									uart_port="COM19",
-									file_binary="../code.bin",
-									boot_mode="optical",
-									skip_reset=False,
-									insert_CRC=True,
-									pad_random_payload=False,)
-		program_cortex(**program_cortex_specs)
-
-	### Programming the Cortex and then attempting to ###
-	### run a spot check with the ADC.				  ###
-	if False:
-		program_cortex_specs = dict(teensy_port="COM15",
-									uart_port="COM19",
-									file_binary="../code.bin",
-									boot_mode="optical",
-									skip_reset=False,
-									insert_CRC=False,
-									pad_random_payload=False,)
-		program_cortex(**program_cortex_specs)
-
-		test_adc_spot_specs = dict(
-			uart_port="COM19",
-			iterations=10,
-			file_binary="../code.bin",
-			skip_reset=False,
-			insert_CRC=False,
-			pad_random_payload=False)
-		adc_out = test_adc_spot(**test_adc_spot_specs)
-		print(adc_out)
-		adc_out_dict = dict()
-		adc_out_dict[0.0] = adc_out
-
-		fname = './spot_check.csv'
-		write_adc_data(adc_out_dict, fname)
-
-	### Programming the cortex and running many iterations on a large ###
-	### sweep. ###
-	if True:
-		program_cortex_specs = dict(teensy_port="COM15",
-									uart_port="COM19",
-									file_binary="../code.bin",
-									boot_mode="optical",
-									skip_reset=False,
-									insert_CRC=False,
-									pad_random_payload=False,)
-		program_cortex(**program_cortex_specs)
-
-		test_adc_psu_specs = dict(vin_vec=,
-								uart_port="COM19",
-								file_binary="../code.bin",
-								psu_name='USB0::0x0957::0x2C07::MY57801384::0::INSTR',
-								iterations=100)
-		adc_outs = test_adc_psu(**test_adc_psu_specs)
-
-		ts = time.gmtime()
-		datetime = time.strftime("%Y%m%d_%H%M%S",ts)
-		write_adc_data(adc_outs, 'psu_{}'.format(datetime))
-
-	### Reading in data and plotting appropriately ###
-	if False:
-		vlsb_ideal = 1.2/2**10
-
-		file_sweep = './data/psu_run_first_linear.csv'
-		adc_sweep = read_adc_data(file_sweep)
-
-		dnl = calc_adc_dnl(adc_sweep, vlsb_ideal)
-		# inl_endpoint = calc_adc_inl_endpoint(adc_sweep, vlsb_ideal)
-		slope, intercept = calc_adc_inl_straightline(adc_sweep, vlsb_ideal)
-
-		dnl_max = max(dnl)
-		dnl_min = min(dnl)
-		# inl_endpoint_max = max(inl_endpoint)
-		# inl_endpoint_min = min(inl_endpoint)
-
-		# print(dnl)
-
-		print("DNL Min/Max: {}/{}".format(dnl_min, dnl_max))
-		# print("INL Endpoint Min/Max: {}/{}".format(inl_endpoint_min, inl_endpoint_max))
-		print("INL Straightline Slope/Intercept: {}/{}".format(slope, intercept))
-
-		x = list(adc_sweep.keys())
-		adc_avg = {vin:round(np.average(codes)) for (vin,codes) \
-					in adc_sweep.items()}
-		y = [adc_avg[i] for i in x]
-		plt.plot(x,y,label="ADC Readings")
-		plt.plot(x, [slope*i+intercept for i in x], label="INL")
-		plt.plot(x, [1024/1.2*i for i in x], label="Ideal")
-		plt.legend()
-		plt.grid()
-		plt.xlabel("$V_{IN}$ (V)")
-		plt.ylabel("ADC Code")
-		plt.title("$V_{DD}$ = 1.2V, Average over 5 Samples")
-		plt.show()
-
-	if False:
-		file_noise = './data/psu_run_noise.csv'
-		adc_noise = read_adc_data(file_noise)
-
-		for vin in adc_noise.keys():
-			plt.figure()
-			plt.hist(adc_noise[vin], bins=100)
-			plt.title("Vin={} V".format(vin))
-			plt.xlabel("Code")
-			plt.ylabel("Occurrences")
-			plt.show()
+	print("Don't modify this file. Use ../run_me.py ")
